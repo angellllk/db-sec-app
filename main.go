@@ -15,8 +15,8 @@ func main() {
 	defer orclDb.Close()
 
 	// Create table
-	errCreate := core.CreateTables(orclDb)
-	if errCreate != nil {
+	errPrep := core.PrepareDB(orclDb)
+	if errPrep != nil {
 		return
 	}
 

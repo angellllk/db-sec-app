@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 
 	go_ora "github.com/sijms/go-ora/v2"
 )
@@ -28,40 +27,83 @@ func ConnectDB() (*sql.DB, error) {
 	return db, nil
 }
 
-func addConstraint(db *sql.DB, table string, constraint string, key string) error {
-	stmt := fmt.Sprintf(`SELECT table_name, constraint_name, status, owner
-	FROM all_constraints
-	WHERE r_owner = 'ANGEL'
-	AND constraint_type = 'R'
-	AND r_constraint_name in
-	 (
-	   SELECT constraint_name from all_constraints
-	   WHERE constraint_type in ('P', 'U')
-	   AND table_name = '%s'
-	   AND owner = 'ANGEL'
-	 )
-	ORDER BY table_name, constraint_name`, strings.ToUpper(table))
-	log.Println(stmt)
-	rows, errExist := db.Query(stmt)
-	if errExist != nil {
-		return errExist
-	}
-	defer rows.Close()
-
-	qConst := ""
-	for rows.Next() {
-		err := rows.Scan(&qConst)
-		if err != nil {
-			return err
-		}
-
-		return nil
+func PrepareDB(db *sql.DB) error {
+	errProc := CreateProcedures(db)
+	if errProc != nil {
+		return errProc
 	}
 
-	_, errF := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT %s
-			FOREIGN KEY (%s) REFERENCES cars (%s)`, table, constraint, key, key))
-	if errF != nil {
-		return errF
+	db.Close()
+
+	connStr := go_ora.BuildUrl("localhost", 1521, "orclpdb", "angel", "angel", nil)
+	db, err := sql.Open("oracle", connStr)
+	if err != nil {
+		return err
+	}
+
+	errCreate := CreateTables(db)
+	if errCreate != nil {
+		return err
+	}
+
+	return nil
+}
+
+func CreateProcedures(db *sql.DB) error {
+	_, errC := db.Exec(
+		`CREATE OR REPLACE PROCEDURE create_table_if_doesnt_exist(
+			p_table_name VARCHAR2,
+			create_table_query VARCHAR2
+		) AUTHID CURRENT_USER IS
+			n NUMBER;
+		BEGIN
+			SELECT COUNT(*) INTO n FROM user_tables WHERE table_name = UPPER(p_table_name);
+			IF (n = 0) THEN
+				EXECUTE IMMEDIATE create_table_query;
+			END IF;
+		END;`)
+	if errC != nil {
+		log.Println(errC)
+		return errC
+	}
+
+	_, errC = db.Exec(
+		`CREATE or REPLACE PROCEDURE encrypt1(text IN VARCHAR2, encrypted_text OUT VARCHAR2) AS
+			key VARCHAR2(8) := '12345678';
+			raw_text RAW(100);
+			raw_key RAW(100);
+			op_mode PLS_INTEGER;
+	BEGIN
+		raw_text := utl_i18n.string_to_raw(text, 'AL32UTF8');
+		raw_key := utl_i18n.string_to_raw(key, 'AL32UTF8');
+
+		op_mode := dbms_crypto.encrypt_des + dbms_crypto.pad_zero + dbms_crypto.chain_ecb;
+
+		encrypted_text := dbms_crypto.encrypt(raw_text, op_mode, raw_key);
+		dbms_output.put_line('Encryption result: ' || encrypted_text);
+	END;
+	`)
+	if errC != nil {
+		log.Println(errC)
+		return errC
+	}
+
+	_, errC = db.Exec(
+		`CREATE or REPLACE PROCEDURE decrypt1(encrypted_text IN VARCHAR2, decrypted_text OUT VARCHAR2) AS
+		key VARCHAR2(8) := '12345678';
+		--raw_text RAW(100);
+		raw_key RAW(100);
+		op_mode PLS_INTEGER;
+	BEGIN
+		raw_key := utl_i18n.string_to_raw(key, 'AL32UTF8');
+		op_mode := dbms_crypto.encrypt_des + dbms_crypto.pad_zero + dbms_crypto.chain_ecb;
+
+		decrypted_text := utl_i18n.raw_to_char(dbms_crypto.decrypt(encrypted_text, op_mode, raw_key), 'AL32UTF8');
+		dbms_output.put_line('Decryption result: ' || decrypted_text);
+	END;`)
+	if errC != nil {
+		log.Println(errC)
+		return errC
 	}
 
 	return nil
@@ -69,22 +111,8 @@ func addConstraint(db *sql.DB, table string, constraint string, key string) erro
 
 func CreateTables(db *sql.DB) error {
 	_, errC := db.Exec(`
-	DECLARE
-		PROCEDURE create_table_if_doesnt_exist(
-			p_create_table_query VARCHAR2
-		) IS
 		BEGIN
-			EXECUTE IMMEDIATE p_create_table_query;
-		EXCEPTION
-			WHEN OTHERS THEN
-			-- suppresses "name is already being used" exception
-			IF SQLCODE = -955 THEN
-				NULL; 
-			END IF;
-		END;
-		
-		BEGIN
-			create_table_if_doesnt_exist('
+			create_table_if_doesnt_exist('buyers', '
 				CREATE TABLE buyers (buyer_nr NUMBER GENERATED AS IDENTITY,
 					phone_nr INTEGER NOT NULL,
 					name VARCHAR2(255) NOT NULL,
@@ -93,15 +121,15 @@ func CreateTables(db *sql.DB) error {
 				)
 			');
 
-			create_table_if_doesnt_exist('
+			create_table_if_doesnt_exist('cars', '
 				CREATE TABLE cars (car_code NUMBER GENERATED AS IDENTITY,
 					price INTEGER NOT NULL,
 					type VARCHAR2(255),
 					PRIMARY KEY (car_code)
 				)
 			');
-
-			create_table_if_doesnt_exist('
+			
+			create_table_if_doesnt_exist('shops', '
 				CREATE TABLE shops (shop_nr NUMBER GENERATED AS IDENTITY,
 					address VARCHAR2(255),
 					name VARCHAR2(255),
@@ -109,7 +137,7 @@ func CreateTables(db *sql.DB) error {
 				)
 			');
 
-			create_table_if_doesnt_exist('
+			create_table_if_doesnt_exist('stock', '
 				CREATE TABLE stock (car_code NUMBER GENERATED AS IDENTITY,
 					shop_nr INTEGER,
 					quantity INTEGER NOT NULL,
@@ -121,7 +149,7 @@ func CreateTables(db *sql.DB) error {
 				)
 			');
 
-			create_table_if_doesnt_exist('
+			create_table_if_doesnt_exist('sales_details', '
 				CREATE TABLE sales_details (car_code INTEGER,
 					sales_nr INTEGER,
 					quantity INTEGER NOT NULL,
@@ -133,7 +161,7 @@ func CreateTables(db *sql.DB) error {
 				)
 			');
 
-			create_table_if_doesnt_exist('
+			create_table_if_doesnt_exist('sales', '
 				CREATE TABLE sales (sales_nr NUMBER GENERATED AS IDENTITY,
 					shop_nr INTEGER NOT NULL,
 					buyer_nr INTEGER NOT NULL,
